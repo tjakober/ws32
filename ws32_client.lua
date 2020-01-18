@@ -4,7 +4,7 @@ M.Opcode = {
    -- ContinuationFrame = 0,
    TextFrame = 1,
    -- BinaryFrame = 2,
-   -- ConnectionCloseFrame = 8,
+   ConnectionCloseFrame = 8,
    PingFrame = 9,
    PongFrame = 10
 }
@@ -26,6 +26,11 @@ M.on = function(callback_str, callback_foo)
     
     return M
 end
+
+local ping_timer = tmr.create()
+ping_timer:register(20000, tmr.ALARM_SEMI, function()
+	M.send('', M.Opcode.PingFrame)
+end)
 
 local len_expected = 0
 local buffer = ''
@@ -49,6 +54,10 @@ local function decode_frame(frame)
             M.send('', M.Opcode.PongFrame)
             return
         end
+		if opcode == M.Opcode.PongFrame then
+			ping_timer:start()
+			return
+		end
     
         local plen = frame:byte(2)
         local mask = bit.isset(plen, 7)
@@ -92,26 +101,37 @@ local function decode_frame(frame)
 end
 
 M.send = function(data, opcode)
+	
     opcode = opcode or M.Opcode.TextFrame
-    
     if is_connected == false then 
         print("[WebSocket] Not connected, so cannot send.")
         return
-    end 
-    
-    if #data > 126 then 
-        print("[WebSocket] Lib only supports max len 126 currently")
-        return
+    end
+	ping_timer:stop()
+	local binstr, payload_len
+	
+    binstr = string.char(bit.bor(0x80, opcode)) -- Fin bit always set, multi-frames not supported
+	if #data < 126 then
+		payload_len = #data
+		payload_len = bit.set(payload_len, 7)
+		binstr = binstr .. string.char(payload_len)
+	elseif #data < 0xFF then
+		binstr = binstr .. string.char(0x7E)
+			.. string.char(bit.arshift(#data, 8))
+			.. string.char(bit.band(#data, 0xFF) )
+	elseif #data < 0x100000000 then
+		binstr = binstr .. string.char(0x7F)
+		local n = string.format('%16x', #data)
+		local pos = 16
+		while pos > 0 do
+			binstr = binstr .. string.char(n:sub(pos, pos))
+		end
+	--else
+		-- in fact this never happens
+		-- print("Payload greater than FFFFFFFF not supported due to Nodemcu's 32 bit integer limit")
     end
     
-    local binstr, payload_len
-
-    payload_len = #data
-    payload_len = bit.set(payload_len, 7)
-    
-    binstr = string.char(bit.set(opcode, 7))
-        .. string.char(payload_len)
-        .. string.char(0x0, 0x0, 0x0, 0x0)
+    binstr = binstr    
         .. data
     
     socket:send(binstr)
@@ -166,11 +186,11 @@ M.connect = function(url, options)
     
     socket = net.createConnection(net.TCP)
 
-    --socket:on("sent", function()
-    --     print("[WebSocket]:sent")
-    --end)
+    socket:on("sent", function()
+		ping_timer:start()
+    end)
 
-    local on_disconnection = function(errcode)
+    local on_disconnection = function(sock, errcode)
         is_connected = false
         is_header_received = false
 
@@ -196,6 +216,7 @@ M.connect = function(url, options)
             if string.match(data, "HTTP/1.1 101(.*)\r\n\r\n") then 
                 is_header_received = true
                 is_connected = true
+				ping_timer:start()
                 
                 if on_connection_callback ~= nil then
                     on_connection_callback(M)
@@ -209,4 +230,9 @@ M.connect = function(url, options)
     socket:connect(port, host)
 end
 
+M.close = function()
+	M.send('', ConnectionCloseFrame)
+end
+
 return M
+
