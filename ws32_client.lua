@@ -36,7 +36,7 @@ local len_expected = 0
 local buffer = ''
 
 local function decode_frame(frame)
-    local data, fin
+    local data, fin, opcode
     
     if len_expected > 0 then
         data = frame 
@@ -45,7 +45,7 @@ local function decode_frame(frame)
         fin = frame:byte(1)
         fin = bit.isset(fin, 7)
     
-        local opcode = frame:byte(1)
+        opcode = frame:byte(1)
         opcode = bit.clear(opcode, 4, 5, 6, 7)
         
         -- print("Opcode:", opcode)
@@ -93,7 +93,7 @@ local function decode_frame(frame)
         len_expected = 0
     
         if on_receive_callback ~= nil then 
-            on_receive_callback(buffer, M)
+            on_receive_callback(buffer, opcode)
         end
     
         buffer = ''
@@ -119,16 +119,19 @@ M.send = function(data, opcode)
 		binstr = binstr .. string.char(0x7E)
 			.. string.char(bit.arshift(#data, 8))
 			.. string.char(bit.band(#data, 0xFF) )
-	elseif #data < 0x100000000 then
+	else
+		local i, n, pos, c
 		binstr = binstr .. string.char(0x7F)
-		local n = string.format('%16x', #data)
-		local pos = 16
-		while pos > 0 do
-			binstr = binstr .. string.char(n:sub(pos, pos))
-		end
-	--else
-		-- in fact this never happens
-		-- print("Payload greater than FFFFFFFF not supported due to Nodemcu's 32 bit integer limit")
+		-- payload length cannot be > 32bit due to lua's integer size
+		-- so first 4 bytes will bee zero
+			binstr = binstr .. string.char(0, 0, 0, 0)
+		-- convert the payload length to 4 bytes
+		binstr = binstr .. string.char(
+			bit.arshift(#data, 24),
+			bit.arshift(#data, 16),
+			bit.arshift(#data,  8),
+			bit.band(#data, 0xFF)
+		)
     end
     
     binstr = binstr    
@@ -216,7 +219,7 @@ M.connect = function(url, options)
             if string.match(data, "HTTP/1.1 101(.*)\r\n\r\n") then 
                 is_header_received = true
                 is_connected = true
-				ping_timer:start()
+		ping_timer:start()
                 
                 if on_connection_callback ~= nil then
                     on_connection_callback(M)
@@ -235,4 +238,3 @@ M.close = function()
 end
 
 return M
-
